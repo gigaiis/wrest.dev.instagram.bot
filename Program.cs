@@ -64,7 +64,7 @@ namespace main
                 }
                 Console.WriteLine("Full count = {0}", count);
 
-                var sleep_next_unfollow = new TimeSpan(0, 0, 30);
+                var sleep_next_unfollow = new TimeSpan(0, 0, 30);           // 0 hours, 0 minutes, 30 seconds
                 var max_count_unfollow = 3;
                 try
                 {
@@ -94,6 +94,7 @@ namespace main
                             if (status.ToString() != "ok") throw new Exception(string.Format("Unknows status: {0} for user_id: {1} not found", status, user_id));
                             else Console.WriteLine("Success unfollow from {0}, user_id: {1}", itm, user_id);
                         else throw new Exception(string.Format("Status for user_id: {0} not found", user_id));
+                        listUnfollow.RemoveAt(0);
                         max_count_unfollow--;
                         Thread.Sleep(sleep_next_unfollow);
                     }
