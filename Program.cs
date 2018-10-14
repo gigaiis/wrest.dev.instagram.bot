@@ -8,7 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Net;
 using System.Net.Http;
-
+using System.IO;
 
 namespace main
 {
@@ -17,96 +17,152 @@ namespace main
         public static long user_id;
         public static Thread thread = new Thread(new ThreadStart(async () =>
         {
+            new Task(async () =>
+            {
+                var r = JsonConvert.DeserializeObject<Dictionary<long, profile_hist>>(await Dev.ReadAsync(InstagramApi.profile_hist_name));
+                if (r != null) InstagramApi.profile_hist = r;
+            }).Start();
+
+            new Task(async () =>
+            {
+                var r = JsonConvert.DeserializeObject<List<long>>(await Dev.ReadAsync(InstagramApi.ignore_list_name));
+                if (r != null) InstagramApi.ignore_list = r;
+            }).Start();
+
+            ApiResult api_res = null;
             try
             {
                 List<string> listUnfollow = new List<string>();
 
+                Console.WriteLine("Auth...");
                 await InstagramApi.Auth("login", "password");
-                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
-                    "https://www.instagram.com/accounts/access_tool/current_follow_requests");
-                JObject data = (JObject)(
-                            (JObject)(
-                                (JArray)(
-                                    (JObject)
-                                        JsonConvert.DeserializeObject<JObject>(
-                                            InstagramApi.DecodeSharedData(await Web.Navigate.Get(request)))
-                                    .GetValue("entry_data"))
-                                .GetValue("SettingsPages"))[0])
-                            .GetValue("data");
-                Object cursor = data.GetValue("cursor").ToObject<Object>();
 
-                List<string> data2 = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
-                listUnfollow.AddRange(data2);
+                //var id = await InstagramApi.GetUserId("scarlxrd");
+                //var d = await InstagramApi.GetProfilePage("scarlxrd");
 
-                var page = 1;
-                var count = data2.Count;
-                Console.WriteLine("Page = {0}", page);
 
-                foreach (var link in data2)
-                    Console.WriteLine(">> {0}", link);
-                while (cursor != null)
+
+                Console.SetCursorPosition(0, 0);
+                Console.WriteLine("Load follow request...");
+
+                var follow_request = await InstagramApi.access_tool.current_follow_requests.LoadALL();   // Запросы на подписоту (приват)
+                var Task_followers = InstagramApi.access_tool.accounts_following_you.LoadALL();          // Наша подписота
+                var Task_following = InstagramApi.access_tool.accounts_you_follow.LoadALL();             // Мы подписаны 
+
+                // TASK UNFOLLOW FROM REQUEST FOLLOW LIST
+
+                var sleep_next_unfollow = new TimeSpan(0, 0, 15);
+                var sleep_try_next = new TimeSpan(0, 15, 0);
+
+                if (follow_request.isSuccess)
                 {
-                    data = (JObject)(JsonConvert.DeserializeObject<JObject>(
-                        await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
-                            string.Format(
-                                "https://www.instagram.com/accounts/access_tool/current_follow_requests?__a=1&cursor={0}", cursor)))))
-                        .GetValue("data");
-                    cursor = data.GetValue("cursor").ToObject<Object>();
-
-                    data2 = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
-                    listUnfollow.AddRange(data2);
-
-                    page++;
-                    Console.WriteLine("Page = {0}", page);
-                    count += data2.Count;
-                    foreach (var link in data2)
-                        Console.WriteLine(">> {0}", link);
-                }
-                Console.WriteLine("Full count = {0}", count);
-
-                var sleep_next_unfollow = new TimeSpan(0, 0, 30);           // 0 hours, 0 minutes, 30 seconds
-                var max_count_unfollow = 3;
-                try
-                {
-                    while ((listUnfollow.Count > 0) && (max_count_unfollow > 0))
+                    while (listUnfollow.Count > 0)
                     {
-                        var itm = listUnfollow.First();
-                        var o = JsonConvert.DeserializeObject<JObject>(
-                            InstagramApi.DecodeSharedData(
-                                await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
-                                    string.Format("https://www.instagram.com/{0}/", itm)))));
-                        var user_id = ((JObject)(
-                                (JObject)(
-                                    (JObject)(
-                                        (JArray)(
-                                            (JObject)o
-                                            .GetValue("entry_data"))
-                                        .GetValue("ProfilePage"))[0])
-                                    .GetValue("graphql"))
-                                 .GetValue("user"))
-                            .GetValue("id").ToString();
-                        HttpWebRequest new_request = (HttpWebRequest)WebRequest.Create(
-                            string.Format("https://www.instagram.com/web/friendships/{0}/unfollow/", user_id));
-                        new_request.Headers.Add("x-csrftoken", ((JObject)o.GetValue("config")).GetValue("csrf_token").ToString());
-                        var status = JsonConvert.DeserializeObject<JObject>(await Web.Navigate.Post(new_request, ""))
-                            .GetValue("status").ToObject<Object>();
-                        if (status != null)
-                            if (status.ToString() != "ok") throw new Exception(string.Format("Unknows status: {0} for user_id: {1} not found", status, user_id));
-                            else Console.WriteLine("Success unfollow from {0}, user_id: {1}", itm, user_id);
-                        else throw new Exception(string.Format("Status for user_id: {0} not found", user_id));
-                        listUnfollow.RemoveAt(0);
-                        max_count_unfollow--;
-                        Thread.Sleep(sleep_next_unfollow);
+                        try
+                        {
+                            if (!(api_res = await InstagramApi.GetUserId(listUnfollow.First())).isSuccess) throw api_res.GetError();
+                            if (!(api_res = await InstagramApi.Unfollow(user_id)).isSuccess) throw api_res.GetError();
+                            Console.WriteLine("Success unfollow, user_id: {0}", user_id);
+                            listUnfollow.RemoveAt(0);
+                            Thread.Sleep(sleep_next_unfollow);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("Error: {0}\r\nWait {1}", ex.Message, sleep_try_next.ToString());
+                            Thread.Sleep(sleep_try_next);
+                        }
                     }
                 }
-                catch (Exception ex) { Console.WriteLine("Error: {0}", ex.Message); }
+                else throw follow_request.GetError();
+
+                while (!Task_followers.IsCompleted || !Task_following.IsCompleted)
+                {
+                    //Console.Clear();
+                    Console.SetCursorPosition(0, 0);
+                    Console.WriteLine("Task_followers.IsCompleted({0}), Task_following.IsCompleted({1})", Task_followers.IsCompleted.ToString(), Task_following.IsCompleted.ToString());
+                    Thread.Sleep(33);
+                }
+
+                var api_followers = Task_followers.Result;
+                var api_following = Task_following.Result;
+
+                if (!api_followers.isSuccess) throw new Exception("Followers return error", api_followers.GetError());
+                if (!api_following.isSuccess) throw new Exception("Following return error", api_following.GetError());
+
+                var followers = api_followers.GetResult();
+                var following = api_following.GetResult();
+
+                var x = following.Except(followers).ToList();
+
+                var l = "";
+
+                Console.WriteLine("Enter ignore or empty for next step");
+                while ((l = Console.ReadLine()) != "")
+                {
+                    try
+                    {
+                        var UserPage = await InstagramApi.GetUserId(l);
+                        if (UserPage.isSuccess)
+                        {
+                            var id = UserPage.GetResult();
+                            if (InstagramApi.ignore_list.Contains(id)) throw new Exception("User already exist");
+                            InstagramApi.ignore_list.Add(id);
+                        }
+                        else throw UserPage.GetError();
+                    }
+                    catch (Exception ex) { Console.WriteLine(ex.Message); }
+                }
+
+                Dev.WriteAsync(InstagramApi.ignore_list_name, JsonConvert.SerializeObject(InstagramApi.ignore_list));
+
+                Console.WriteLine("RESULT TASK: ");
+
+                int ind = 0;
+                while (ind < x.Count)
+                {
+                    var id = (await InstagramApi.GetProfilePage(x.ElementAt(ind))).GetResult().id;
+                    if (InstagramApi.ignore_list.Contains(id))
+                    {
+                        Console.WriteLine("Ignored: {0}", x.ElementAt(ind));
+                        x.RemoveAt(ind);
+                    }
+                    else ind++;
+                }
+
+                while (x.Count > 0)
+                {
+                    try
+                    {
+                        var i = x.First();
+                        Console.Write("Unfollow from {0}...", i);
+                        await (await InstagramApi.GetProfilePage(i)).GetResult().Unfollow();
+                        Console.Write("Ok\r\n");
+                        x.RemoveAt(0);
+                        Thread.Sleep(sleep_next_unfollow);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("Error in final task: {0}\r\nWait {1}", ex.Message, sleep_try_next.ToString());
+                        Thread.Sleep(sleep_try_next);
+                    }
+                }
+
+                Console.WriteLine("End task");
             }
             catch (Exception ex) { Console.WriteLine("Exception in thread: {0}", ex.Message); }
+
+            thread.Abort();
         }));
         static void Main(string[] args)
         {
             thread.Start();
-            Console.Read();
+            while (thread.ThreadState != ThreadState.Aborted)
+                Thread.Sleep(33);
+
+            Console.WriteLine("Save...");
+            Dev.WriteAsync(InstagramApi.profile_hist_name, JsonConvert.SerializeObject(InstagramApi.profile_hist));
+            Console.WriteLine("Press key to exit");
+            Console.ReadKey();
         }
     }
 }
