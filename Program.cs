@@ -1,58 +1,76 @@
 ﻿using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Net;
-using System.Net.Http;
-using System.IO;
 
 namespace main
 {
     public class Program
     {
-        public static long user_id;
+
+
         public static Thread thread = new Thread(new ThreadStart(async () =>
         {
-            new Task(async () =>
-            {
-                var r = JsonConvert.DeserializeObject<Dictionary<long, profile_hist>>(await Dev.ReadAsync(InstagramApi.profile_hist_name));
-                if (r != null) InstagramApi.profile_hist = r;
-            }).Start();
-
-            new Task(async () =>
-            {
-                var r = JsonConvert.DeserializeObject<List<long>>(await Dev.ReadAsync(InstagramApi.ignore_list_name));
-                if (r != null) InstagramApi.ignore_list = r;
-            }).Start();
-
             ApiResult api_res = null;
             try
             {
+                Log.Write("\r\n\t\t ***** INIT *****\r\n");
+                Console.Write("Init...");
+                if (!(api_res = (await InstagramApi.Init())).isSuccess) throw api_res.GetError();
+                Console.WriteLine("Done.");
+
+                Console.Write("Auth...");
+                var Task_auth = InstagramApi.account.Auth(Login, Password);
+                using (var progress = new ProgressBar())
+                {
+                    int i = 0;
+                    while (!Task_auth.IsCompleted)
+                    {
+                        progress.Report((double)i / 100);
+                        Thread.Sleep(33);
+                        i++;
+                        if (i > 100) i = 0;
+                    }
+                }
+
                 List<string> listUnfollow = new List<string>();
 
-                Console.WriteLine("Auth...");
-                await InstagramApi.Auth("login", "password");
+                //user_id = (await InstagramApi.GetUserId(Login)).GetResult();
 
-                //var id = await InstagramApi.GetUserId("scarlxrd");
-                //var d = await InstagramApi.GetProfilePage("scarlxrd");
+                //var activity = await InstagramApi.account.activity.Load();
+                //if (!activity.isSuccess) throw activity.GetError();
 
+                Console.WriteLine("Done. -> followers: {0}, following: {1}", User.user_profile.followers, User.user_profile.following);
 
+                var activity = (await InstagramApi.account.activity.Load(true)).GetResult();
+                Console.WriteLine("\t --- Activity list ---");
 
-                Console.SetCursorPosition(0, 0);
-                Console.WriteLine("Load follow request...");
+                //foreach (var i in activity)
+                //{
+                //    Console.WriteLine(" >>> {0} => {1} <<<", i.user.ToString(), i._type.ToString());
+                //}
 
-                var follow_request = await InstagramApi.access_tool.current_follow_requests.LoadALL();   // Запросы на подписоту (приват)
-                var Task_followers = InstagramApi.access_tool.accounts_following_you.LoadALL();          // Наша подписота
-                var Task_following = InstagramApi.access_tool.accounts_you_follow.LoadALL();             // Мы подписаны 
+                Console.WriteLine("\t --- Count = {0} ---", activity.Count);
 
-                // TASK UNFOLLOW FROM REQUEST FOLLOW LIST
+                Console.Write("Load follow request...");
+
+                List<string> followers = JsonConvert.DeserializeObject<List<string>>(
+                    await Dev.ReadAsync("followers.json")
+                );
+                List<string> following = JsonConvert.DeserializeObject<List<string>>(
+                    await Dev.ReadAsync("following.json")
+                );
 
                 var sleep_next_unfollow = new TimeSpan(0, 0, 15);
                 var sleep_try_next = new TimeSpan(0, 15, 0);
+
+                var follow_request = await InstagramApi.account.access_tool.current_follow_requests.LoadALL();   // Запросы на подписоту (приват)
+                Task<ApiResult<List<string>>> Task_followers = Task.Run(() => new ApiResult<List<string>>(followers));
+
+                Console.WriteLine("Done.");
 
                 if (follow_request.isSuccess)
                 {
@@ -61,8 +79,8 @@ namespace main
                         try
                         {
                             if (!(api_res = await InstagramApi.GetUserId(listUnfollow.First())).isSuccess) throw api_res.GetError();
-                            if (!(api_res = await InstagramApi.Unfollow(user_id)).isSuccess) throw api_res.GetError();
-                            Console.WriteLine("Success unfollow, user_id: {0}", user_id);
+                            if (!(api_res = await InstagramApi.web.friendships.Unfollow(User.user_id)).isSuccess) throw api_res.GetError();
+                            Console.WriteLine("Success unfollow, user_id: {0}", User.user_id);
                             listUnfollow.RemoveAt(0);
                             Thread.Sleep(sleep_next_unfollow);
                         }
@@ -75,13 +93,38 @@ namespace main
                 }
                 else throw follow_request.GetError();
 
-                while (!Task_followers.IsCompleted || !Task_following.IsCompleted)
+                if (followers.Count != InstagramApi.account.access_tool.accounts_following_you.current_max)
+                    Task_followers = InstagramApi.account.access_tool.accounts_following_you.LoadALL();          // Наша подписота
+
+                Task<ApiResult<List<string>>> Task_following = Task.Run(() => new ApiResult<List<string>>(following));
+                if (following.Count != InstagramApi.account.access_tool.accounts_you_follow.current_max)
+                    Task_following = InstagramApi.account.access_tool.accounts_you_follow.LoadALL();             // Мы подписаны 
+
+                Console.Write("Task_followers...");
+                using (var progress = new ProgressBar())
                 {
-                    //Console.Clear();
-                    Console.SetCursorPosition(0, 0);
-                    Console.WriteLine("Task_followers.IsCompleted({0}), Task_following.IsCompleted({1})", Task_followers.IsCompleted.ToString(), Task_following.IsCompleted.ToString());
-                    Thread.Sleep(33);
+                    while (!Task_followers.IsCompleted)
+                    {
+                        progress.Report(
+                            (double)InstagramApi.account.access_tool.accounts_following_you.current_pos /
+                            InstagramApi.account.access_tool.accounts_following_you.current_max);
+                        Thread.Sleep(33);
+                    }
                 }
+                Console.WriteLine("Done.");
+
+                Console.Write("Task_following...");
+                using (var progress = new ProgressBar())
+                {
+                    while (!Task_following.IsCompleted)
+                    {
+                        progress.Report(
+                            (double)InstagramApi.account.access_tool.accounts_you_follow.current_pos /
+                            InstagramApi.account.access_tool.accounts_you_follow.current_max);
+                        Thread.Sleep(33);
+                    }
+                }
+                Console.WriteLine("Done.");
 
                 var api_followers = Task_followers.Result;
                 var api_following = Task_following.Result;
@@ -89,14 +132,26 @@ namespace main
                 if (!api_followers.isSuccess) throw new Exception("Followers return error", api_followers.GetError());
                 if (!api_following.isSuccess) throw new Exception("Following return error", api_following.GetError());
 
-                var followers = api_followers.GetResult();
-                var following = api_following.GetResult();
+                followers = api_followers.GetResult();
+                following = api_following.GetResult();
+
+                Console.WriteLine("followers = {0}", followers.Count);
+                Console.WriteLine("following = {0}", following.Count);
+
+                await Dev.WriteAsync("followers.json", JsonConvert.SerializeObject(followers));
+                await Dev.WriteAsync("following.json", JsonConvert.SerializeObject(following));
 
                 var x = following.Except(followers).ToList();
-
                 var l = "";
-
-                Console.WriteLine("Enter ignore or empty for next step");
+                Console.WriteLine("\t --- Current ignore list ---");
+                foreach (var i in InstagramApi.ignore_list)
+                {
+                    var profile = InstagramApi.FindProfileInHistory(i);
+                    if (profile.isSuccess) Console.WriteLine("{0}", profile.GetResult().username);
+                    else Console.WriteLine(" >>> Error find profile in hist [{0}]: {1} <<<", i, profile.GetError().Message);
+                }
+                Console.WriteLine("\t --- Count = {0} ---", InstagramApi.ignore_list.Count);
+                Console.WriteLine("\r\nEnter ignore or empty for next step");
                 while ((l = Console.ReadLine()) != "")
                 {
                     try
@@ -113,21 +168,85 @@ namespace main
                     catch (Exception ex) { Console.WriteLine(ex.Message); }
                 }
 
-                Dev.WriteAsync(InstagramApi.ignore_list_name, JsonConvert.SerializeObject(InstagramApi.ignore_list));
+                await Dev.WriteAsync(InstagramApi.ignore_list_name, JsonConvert.SerializeObject(InstagramApi.ignore_list));
 
-                Console.WriteLine("RESULT TASK: ");
+                Console.WriteLine("Result:");
+
+                int next_step_sleep = 5;
 
                 int ind = 0;
-                while (ind < x.Count)
+                int counter = 0;
+                int counter2 = 0;
+                int max_counter = x.Count;
+
+                Console.WriteLine("UpdateUnfollowList...");
+                using (var progress = new ProgressBar())
                 {
-                    var id = (await InstagramApi.GetProfilePage(x.ElementAt(ind))).GetResult().id;
-                    if (InstagramApi.ignore_list.Contains(id))
+                    while (ind < x.Count)
                     {
-                        Console.WriteLine("Ignored: {0}", x.ElementAt(ind));
-                        x.RemoveAt(ind);
+                        progress.Report((double)counter / max_counter);
+                        try
+                        {
+                            var profile = await InstagramApi.GetProfile(x.ElementAt(ind));
+                            if (!profile.isSuccess) throw profile.GetError();
+                            var id = profile.GetResult().id;
+                            if (InstagramApi.ignore_list.Contains(id))
+                            {
+                                Console.WriteLine("Ignored: {0}", x.ElementAt(ind));
+                                x.RemoveAt(ind);
+                            }
+                            else ind++;
+                            counter++;
+                            if (!profile.isCash())
+                            {
+                                if (++counter2 >= 500)
+                                {
+                                    counter2 = 0;
+                                    var v = (int)Math.Round(next_step_sleep * 0.16);
+                                    if (v != next_step_sleep)
+                                    {
+                                        next_step_sleep = v;
+                                        Console.WriteLine("step_sleep = {0}", next_step_sleep);
+                                    }
+                                }
+                                Thread.Sleep(next_step_sleep + 500);
+                            }        
+                        }
+                        catch (WebException ex)
+                        {
+                            HttpWebResponse response = ((HttpWebResponse)ex.Response);
+                            var code = response.StatusCode;
+                            Console.WriteLine("Server return error: {0}", code);
+                            if (Convert.ToInt32(code) == 429)
+                            {
+                                string err = "Too many request per second!";
+                                Console.WriteLine("{0}\r\nwait 3 min...", err);
+                                Log.Write(string.Format("WebException {0}", err));
+
+                                var Task_auto_save =
+                                    Dev.WriteAsync(InstagramApi.profile_hist_name, JsonConvert.SerializeObject(InstagramApi.profile_hist));
+
+                                Thread.Sleep(new TimeSpan(0, 3, 0));
+
+                                while (!Task_auto_save.IsCompleted)
+                                    Thread.Sleep(33);
+
+                                next_step_sleep = (next_step_sleep * 2) + 100;
+                                Console.WriteLine("step_sleep = {0}", next_step_sleep);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("\r\n >>> {0} of {1} <<< \r\n", counter, max_counter);
+                            throw ex;
+                        }
                     }
-                    else ind++;
                 }
+                Console.WriteLine("Done.");
+
+
+
+                var z = following.Except(x).ToList();       // work list
 
                 while (x.Count > 0)
                 {
@@ -135,8 +254,13 @@ namespace main
                     {
                         var i = x.First();
                         Console.Write("Unfollow from {0}...", i);
-                        await (await InstagramApi.GetProfilePage(i)).GetResult().Unfollow();
+                        model.profile profile = (await InstagramApi.GetProfile(i)).GetResult();
+                        await profile.Unfollow();
                         Console.Write("Ok\r\n");
+
+                        var sel = InstagramApi.work_list.Where(e => e.profile.Equals(profile)).ToList();
+                        InstagramApi.work_list = InstagramApi.work_list.Except(sel).ToList();
+
                         x.RemoveAt(0);
                         Thread.Sleep(sleep_next_unfollow);
                     }
@@ -149,18 +273,36 @@ namespace main
 
                 Console.WriteLine("End task");
             }
-            catch (Exception ex) { Console.WriteLine("Exception in thread: {0}", ex.Message); }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Exception in thread: \r\n\tMessage = {0}\r\n\tStackTrace = {1}", ex.Message, ex.StackTrace);
+                if (ex.InnerException != null)
+                    Console.WriteLine(
+                        "[InnerException]: \r\n\tMessage = {0}\r\n\tStackTrace = {1}",
+                        ex.InnerException.Message,
+                        ex.InnerException.StackTrace
+                    );
+            }
 
             thread.Abort();
         }));
         static void Main(string[] args)
         {
+            Console.BackgroundColor = ConsoleColor.DarkRed;
+
             thread.Start();
             while (thread.ThreadState != ThreadState.Aborted)
                 Thread.Sleep(33);
 
-            Console.WriteLine("Save...");
-            Dev.WriteAsync(InstagramApi.profile_hist_name, JsonConvert.SerializeObject(InstagramApi.profile_hist));
+            Console.Write("Save...");
+            var Task_save = Task.Run(async () =>
+            {
+                await Dev.WriteAsync(InstagramApi.profile_hist_name, JsonConvert.SerializeObject(InstagramApi.profile_hist));
+                await Dev.WriteAsync(InstagramApi.work_list_name, JsonConvert.SerializeObject(InstagramApi.work_list));
+            });
+            while (!Task_save.IsCompleted)
+                Thread.Sleep(33);
+            Console.WriteLine("Done.");
             Console.WriteLine("Press key to exit");
             Console.ReadKey();
         }

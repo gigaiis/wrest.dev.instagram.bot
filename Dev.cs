@@ -29,13 +29,15 @@ namespace main
                 return Encoding.UTF8.GetString(bytes);
             }
         }
-        public static async void WriteAsync(string filename, string text)
+        public static async Task WriteAsync(string filename, string text)
         {
+            File.WriteAllText(filename, string.Empty);
             using (FileStream fs = new FileStream(filename, FileMode.OpenOrCreate, FileAccess.ReadWrite))
             {
                 byte[] bytes = Encoding.UTF8.GetBytes(text);
                 await fs.WriteAsync(bytes, 0, bytes.Length);
                 fs.Close();
+                return;
             }
         }
     }
