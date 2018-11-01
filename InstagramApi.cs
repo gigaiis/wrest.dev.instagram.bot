@@ -1,11 +1,14 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace main
@@ -22,7 +25,13 @@ namespace main
             _isCash = isCash;
             _result = result;
         }
-        public T GetResult() => _result;
+        public T GetResult()
+        {
+            if (_result == null)
+                if (_exception != null) throw _exception;
+                else return default(T);
+            return _result;
+        }
         public bool isCash() => _isCash;
         public bool isSuccess { get => _result != null && _exception == null; }
         public ApiResult(Exception exception) => SetError(exception);
@@ -32,7 +41,8 @@ namespace main
         public static implicit operator ApiResult<T>(ApiResult v)
         {
             var r = new ApiResult<T>();
-            r.SetResult((T)v.GetResult(), v.isCash());
+            var res = v.GetResult();
+            if (!(res is Exception)) r.SetResult((T)v.GetResult(), v.isCash());
             r.SetError(v.GetError());
             return r;
         }
@@ -63,7 +73,7 @@ namespace main
     public static class InstagramApi
     {
         public static readonly string profile_hist_name = @"profile_hist.json";
-        public static readonly string ignore_list_name = @"ignore_list.json";
+        public static readonly string ignore_list_name = @"unfollow_ignore_list.json";
         public static readonly string work_list_name = @"work_list.json";
         public static readonly string activity_list_name = @"activity_list.json";
 
@@ -74,10 +84,21 @@ namespace main
         {
             try
             {
+
                 account.activity.activity_list = await config.LoadModule<List<model.activity_list>>(activity_list_name);
-                profile_hist = await config.LoadModule<Dictionary<long, model.profile_hist>>(profile_hist_name);
-                ignore_list = await config.LoadModule<List<long>>(ignore_list_name);
-                work_list = await config.LoadModule<List<model.work_list>>(work_list_name);
+                var Task_config = config.LoadModule<model.config>(config.name);
+                var Task_profile_hist = config.LoadModule<Dictionary<long, model.profile_hist>>(profile_hist_name);
+                var Task_ignore_list = config.LoadModule<List<long>>(ignore_list_name);
+                var Task_work_list = config.LoadModule<List<model.work_list>>(work_list_name);
+                while (!Task_config.IsCompleted || !Task_profile_hist.IsCompleted ||
+                    !Task_ignore_list.IsCompleted || !Task_work_list.IsCompleted)
+                    Thread.Sleep(33);
+
+                config.value = Task_config.Result;
+                profile_hist = Task_profile_hist.Result;
+                ignore_list = Task_ignore_list.Result;
+                work_list = Task_work_list.Result;
+
                 return new ApiResult<bool>(true);
             }
             catch (Exception ex) { return new ApiResult<bool>(ex); }
@@ -85,8 +106,37 @@ namespace main
 
         public static class config
         {
-            public static string csrf_token = "";
+            public static readonly string name = @"config.json";
+            public static Dictionary<string, string> consumer = new Dictionary<string, string>()
+            {
+                {"edge_followed_by", "" },
+                {"edge_follow", "" }
+            };
+            private static string s_csrf_token = "";
+            public static string csrf_token
+            {
+                get
+                {
+                    try
+                    {
+                        Hashtable table = (Hashtable)Web.Cookies.GetType().InvokeMember(
+                            "m_domainTable", BindingFlags.NonPublic | BindingFlags.GetField | BindingFlags.Instance, 
+                            null, Web.Cookies, new object[] { });
+                        var x = JsonConvert.DeserializeObject<JObject>(JsonConvert.SerializeObject(table[".instagram.com"]));
+                        var a = (x.GetValue("Values") as JArray);
+                        foreach (JArray e in a)
+                            foreach (JObject o in e)
+                                if (o.Value<string>("Name") == "csrftoken") return s_csrf_token = o.Value<string>("Value");
+                    }
+                    catch (Exception) { }
+                    return s_csrf_token;
+                }
+                set => s_csrf_token = value;
+            }
+            public static string rollout_hash = "";
             public static string viewerId = "";
+            public static model.config value = new model.config();
+
 
             public static async Task<T> LoadModule<T>(string module_name, bool safe_mode = true) where T : new()
             {
@@ -113,10 +163,110 @@ namespace main
 
             JObject o = JsonConvert.DeserializeObject<JObject>(input);
             JObject config = (JObject)o.GetValue("config");
+
+            Hashtable table = (Hashtable)Web.Cookies.GetType().InvokeMember("m_domainTable",
+                                                                         BindingFlags.NonPublic |
+                                                                         BindingFlags.GetField |
+                                                                         BindingFlags.Instance,
+                                                                         null,
+                                                                         Web.Cookies,
+                                                                         new object[] { });
+
             InstagramApi.config.csrf_token = config.GetValue("csrf_token").ToString();
             InstagramApi.config.viewerId = config.GetValue("viewerId").ToString();
-
+            InstagramApi.config.rollout_hash = o.Value<string>("rollout_hash");
             return o;
+        }
+
+
+        static async Task<ApiResult<model.followers>> followers_following_do(string what_do, string user_id, bool _include_reel = true, bool _fetch_mutual = true, long _first = 24, string _after = null)
+        {
+            try
+            {
+                if (config.consumer.ContainsKey(what_do))
+                {
+                    model.followers result = new model.followers();
+
+                    object o = new { id = user_id, include_reel = _include_reel, fetch_mutual = _fetch_mutual, first = _first };
+                    if (_after != null) o = new { id = user_id, include_reel = _include_reel, fetch_mutual = _fetch_mutual, first = _first, after = _after };
+
+                    var el = await Web.Navigate.Get(
+                        Web.GenXRequest(
+                            string.Format("https://www.instagram.com/graphql/query/?query_hash={0}&variables={1}",
+                                config.consumer[what_do],
+                                Uri.EscapeDataString(JsonConvert.SerializeObject(o))
+                            )
+                        ), null);
+                    var data = JsonConvert.DeserializeObject<JObject>(el).GetValue("data") as JObject;
+                    var user = data.GetValue("user") as JObject;
+                    var edge = user.GetValue(what_do) as JObject;
+                    result.count = edge.Value<long>("count");
+
+                    var page_info = edge.GetValue("page_info") as JObject;
+                    result.has_next_page = page_info.Value<bool>("has_next_page");
+                    result.end_cursor = page_info.Value<string>("end_cursor");
+
+                    var edges = edge.GetValue("edges") as JArray;
+                    edges = JArray.FromObject(edges.Select(e => (e as JObject).GetValue("node") as JObject));
+                    result.list = JsonConvert.DeserializeObject<List<model.profile>>(edges.ToString());
+                    // edge_followed_by ~ followers
+                    // edge_follow      ~ following
+                    return new ApiResult(result);
+                }
+                else throw new Exception(string.Format("\"{0}\" not found in consumer", what_do));
+            }
+            catch (Exception ex) { return new ApiResult(ex); }
+        }
+        public static class followers
+        {
+            public static async Task<ApiResult<model.followers>> All(string user_id, bool _include_reel = true, bool _fetch_mutual = true, long count_pre_step = 24)
+            {
+                try
+                {
+                    model.followers result = new model.followers();
+                    model.followers temp = new model.followers();
+                    string after = null;
+                    do
+                    {
+                        var item = await Get(user_id, _include_reel, _fetch_mutual, count_pre_step, after);
+                        if (!item.isSuccess) throw item.GetError();
+                        temp = item.GetResult();
+                        result.list.AddRange(temp.list);
+                        after = temp.end_cursor;
+                        Thread.Sleep(1000);
+                    } while (temp.has_next_page);
+                    result.count = temp.count;
+                    return new ApiResult<model.followers>(result);
+                }
+                catch (Exception ex) { return new ApiResult<model.followers>(ex); }
+            }
+            public static Task<ApiResult<model.followers>> Get(
+                string user_id, bool _include_reel = true, bool _fetch_mutual = true, long _first = 24, string _after = null) =>
+                    followers_following_do("edge_followed_by", user_id, _include_reel, _fetch_mutual, _first, _after);
+        }
+        public static class following
+        {
+            public static async Task<ApiResult<model.followers>> All(string user_id, bool _include_reel = true, bool _fetch_mutual = false, long count_pre_step = 24)
+            {
+                try
+                {
+                    model.followers result = new model.followers();
+                    model.followers temp = new model.followers();
+                    string after = null;
+                    do
+                    {
+                        temp = (await Get(user_id, _include_reel, _fetch_mutual, count_pre_step, after)).GetResult();
+                        result.list.AddRange(temp.list);
+                        after = temp.end_cursor;
+                    } while (temp.has_next_page);
+                    result.count = temp.count;
+                    return new ApiResult<model.followers>(result);
+                }
+                catch (Exception ex) { return new ApiResult<model.followers>(ex); }
+            }
+            public static async Task<ApiResult<model.followers>> Get(
+                string user_id, bool _include_reel = true, bool _fetch_mutual = true, long _first = 24, string _after = null) =>
+                    await followers_following_do("edge_follow", user_id, _include_reel, _fetch_mutual, _first, _after);
         }
         public static class account
         {
@@ -126,11 +276,43 @@ namespace main
                 var link = string.Format("{0}login/", Link);
                 try
                 {
-                    DecodeSharedData(await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(link)));
-                    HttpWebRequest request = (HttpWebRequest)WebRequest.Create(link + "ajax");
-                    request.Headers.Add("x-csrftoken", config.csrf_token);
+                    var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(link));
+
+                    var consumer_link = debug_string;
+
+                    int ind = -1;
+                    if ((ind = consumer_link.IndexOf("/static/bundles/base/Consumer.js/")) < 0) throw new Exception("First step find consumer_link fail");
+                    consumer_link = string.Format("https://www.instagram.com{0}", consumer_link.Substring(ind));
+                    if ((ind = consumer_link.IndexOf("\"")) < 0) throw new Exception("Last step find consumer_link fail");
+                    consumer_link = consumer_link.Substring(0, ind);
+
+                    var consumer = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(consumer_link));
+                    if ((ind = consumer.IndexOf("959:")) < 0) throw new Exception("First step find consumer fail");
+                    consumer = consumer.Substring(ind);
+                    if ((ind = consumer.IndexOf("960:")) < 0) throw new Exception("Last step find consumer fail");
+                    consumer = consumer.Substring(0, ind);
+
+                    Regex r = new Regex("(?<key>[a-z])=\"(?<value>[a-z0-9]{32})\"");
+                    Dictionary<string, string> fields = new Dictionary<string, string>();
+                    foreach (Match match in r.Matches(consumer))
+                        if (match.Success) fields.Add(match.Groups[1].ToString(), match.Groups[2].ToString());
+
+                    for (int i = 0; i < config.consumer.Count; i++)
+                    {
+                        var k = config.consumer.ElementAt(i).Key;
+                        Regex r2 = new Regex(string.Format("[a-z]=(?<field>[a-z]),[a-z]=\"{0}\"", k));
+                        foreach (Match match in r2.Matches(consumer))
+                        {
+                            var field = match.Groups["field"].ToString();
+                            if (match.Success && fields.ContainsKey(field))
+                                config.consumer[k] = fields[field];
+                        }
+                    }
+
+
+                    var o = DecodeSharedData(debug_string);
                     var auth = JsonConvert.DeserializeObject<model.auth>(
-                        await Web.Navigate.Post(request, string.Format("username={0}&password={1}", login, password) + "&queryParams={}")
+                        await Web.Navigate.Post(Web.GenXRequest(link + "ajax/"), string.Format("username={0}&password={1}", login, password) + "&queryParams={}")
                     );
                     User.user_profile = (await GetProfile(login, true)).GetResult();
                     return new ApiResult<bool>(!((auth.authenticated != true) || (auth.user != true) || (auth.status != "ok")));
@@ -139,7 +321,9 @@ namespace main
             }
             public static class activity
             {
-                public static readonly TimeSpan cooldown = new TimeSpan(24, 0, 0);
+                static readonly string Link = account.Link + "activity/";
+                public static double timestamp = 0;
+                static readonly TimeSpan cooldown = new TimeSpan(24, 0, 0);
                 public static readonly Dictionary<model.activity_list.type, long> limits =
                     new Dictionary<model.activity_list.type, long>()
                 {
@@ -167,17 +351,15 @@ namespace main
                     await Dev.WriteAsync(activity_list_name, JsonConvert.SerializeObject(activity_list));
                 }
 
-                static readonly string Link = account.Link + "activity/";
-                static long expiring_at = 0;
                 public static async Task<ApiResult<List<model.activity>>> Load(bool only_new = false, bool include_reel = true)
                 {
                     List<model.activity> result = new List<model.activity>();
                     try
                     {
-                        string debug_object = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
+                        var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
                             string.Format("{0}?__a=1&include_reel={1}", Link, include_reel.ToString().ToLower())));
 
-                        var obj = JsonConvert.DeserializeObject<JObject>(debug_object)
+                        var obj = JsonConvert.DeserializeObject<JObject>(debug_string)
                             .Value<JObject>("graphql")
                             .Value<JObject>("user")
                             .Value<JObject>("activity_feed")
@@ -192,32 +374,18 @@ namespace main
                                 model.activity a = JsonConvert.DeserializeObject<model.activity>(node.ToString());
                                 if (a._type != model.activity.type.GraphGdprConsentStory)
                                 {
-
                                     var user = o.Value<JObject>("node").Value<JObject>("user");
-
                                     var profile = await GetProfile(a.user.username);
                                     if (!profile.isSuccess) throw profile.GetError();
-
                                     a.user = profile.GetResult();
-                                    if (include_reel) a.expiring_at = Convert.ToInt64(
-                                        user.Value<JObject>("reel").Value<string>("expiring_at")
-                                    );
-
+                                    //if (include_reel) a.timestamp = Convert.ToInt64(user.Value<JObject>("reel").Value<string>("expiring_at"));
                                     result.Add(a);
-
                                 }
                             }
-                            catch (Exception ex)
-                            {
-                                return new ApiResult<List<model.activity>>();
-                            }
-                            catch
-                            {
-                                return new ApiResult<List<model.activity>>();
-                            }
+                            catch (Exception ex) { return new ApiResult<List<model.activity>>(ex); }
                         }
-                        var _result = new ApiResult<List<model.activity>>((only_new) ? result.Where(e => e.expiring_at > expiring_at).ToList() : result);
-                        if (result.Count > 0) expiring_at = result.First().expiring_at;
+                        var _result = new ApiResult<List<model.activity>>((only_new) ? result.Where(e => e.timestamp > timestamp).ToList() : result);
+                        if (_result.GetResult().Count > 0) timestamp = _result.GetResult().First().timestamp;
                         return _result;
                     }
                     catch (Exception ex) { return new ApiResult<List<model.activity>>(ex); }
@@ -242,19 +410,12 @@ namespace main
                 {
                     string _Link = Link;
                     Current_value[_Link] = new _cv();
-                    Link = access_tool.Link + Link;
+                    Link = access_tool.Link + string.Format("{0}?__a=1", Link);
                     List<string> result = new List<string>();
                     try
                     {
-                        JObject _DecodeSharedData = DecodeSharedData(await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(Link)));
-                        string debug_object = _DecodeSharedData.ToString();
-
-                        JObject data = (JObject)((JObject)((JArray)((JObject)
-                                    _DecodeSharedData
-                                    .GetValue("entry_data"))
-                                .GetValue("SettingsPages"))[0])
-                            .GetValue("data");
-
+                        var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(Link));
+                        JObject data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
                         List<string> _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
                         result.AddRange(_list);
                         Current_value[_Link].current += _list.Count;
@@ -262,9 +423,8 @@ namespace main
                         Object cursor = null;
                         while ((cursor = data.GetValue("cursor").ToObject<Object>()) != null)
                         {
-                            data = (JObject)(JsonConvert.DeserializeObject<JObject>(
-                                await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(string.Format("{0}?__a=1&cursor={1}", Link, cursor)))))
-                                .GetValue("data");
+                            debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(string.Format("{0}&cursor={1}", Link, cursor)));
+                            data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
 
                             _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
                             result.AddRange(_list);
@@ -302,8 +462,6 @@ namespace main
                 }
             }
         }
-
-
         public static async Task<ApiResult<model.profile>> GetProfile(string username, bool ignore_hash = false)
         {
             try
@@ -319,20 +477,32 @@ namespace main
                     }
                 }
 
-                JObject _decData = DecodeSharedData(
-                    await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
-                        string.Format("https://www.instagram.com/{0}/", username)
-                    )));
+                var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(
+                    string.Format("https://www.instagram.com/{0}/?__a=1", username)
+                ));
 
-                if (_decData == null) throw new WebException("", (WebExceptionStatus)429);
-
-                JObject obj = ((JObject)((JObject)((JObject)((JArray)((JObject)
-                    _decData.GetValue("entry_data")).GetValue("ProfilePage"))[0])
-                    .GetValue("graphql")).GetValue("user"));
+                JObject o = JsonConvert.DeserializeObject<JObject>(debug_string);
+                JObject obj = (o.GetValue("graphql") as JObject).GetValue("user") as JObject;
 
                 var p = JsonConvert.DeserializeObject<model.profile>(obj.ToString());
                 p.followers = Convert.ToInt64(((JObject)obj.GetValue("edge_followed_by")).GetValue("count"));
                 p.following = Convert.ToInt64(((JObject)obj.GetValue("edge_follow")).GetValue("count"));
+
+                var xT = obj.GetValue("edge_owner_to_timeline_media") as JObject;
+                var page_info_obj = xT.GetValue("page_info") as JObject;
+                p.posts = new model.posts();
+                p.posts.count = xT.Value<long>("count");
+                p.posts.has_next_page = page_info_obj.Value<bool>("has_next_page");
+                p.posts.end_cursor = page_info_obj.Value<string>("end_cursor");
+                var arr = xT.GetValue("edges").Value<JArray>();
+                foreach (JObject e in arr)
+                {
+                    var node = e.GetValue("node") as JObject;
+                    model.post post = JsonConvert.DeserializeObject<model.post>(node.ToString());
+                    post.comment_count = (node.GetValue("edge_media_to_comment") as JObject).Value<long>("count");
+                    post.like_count = (node.GetValue("edge_liked_by") as JObject).Value<long>("count");
+                    p.posts.Add(post);
+                }
 
                 if (profile_hist.ContainsKey(p.id))
                 {
@@ -384,12 +554,8 @@ namespace main
                         throw new Exception(string.Format("Secure system said: type {0} limit {1}", type.ToString(), limit));
                     //var z = MethodBase.GetCurrentMethod().DeclaringType.Name;
                     //var x = typeof(comments).GetType().Name;
-                    HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
-                        string.Format("{0}{1}/", Link, short_link)
-                    );
-                    request.Headers.Add("x-csrftoken", config.csrf_token);
-                    var debug_output = await Web.Navigate.Post(request, "");
-                    var obj = JsonConvert.DeserializeObject<JObject>(debug_output);
+                    var debug_string = await Web.Navigate.Post(Web.GenXRequest(string.Format("{0}{1}/", Link, short_link)), "");
+                    var obj = JsonConvert.DeserializeObject<JObject>(debug_string);
                     var status = obj.GetValue("status").ToObject<Object>();
                     if (status == null) throw new Exception("Field status not found");
                     if (status.ToString() != "ok") throw new Exception(

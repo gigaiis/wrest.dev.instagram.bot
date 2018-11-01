@@ -17,9 +17,26 @@ namespace model
         public string status;
     }
 
+    public class post
+    {
+        public string id;
+        public string __typename;
+        public bool is_video;
+
+        public long comment_count;
+        public bool comments_disabled;
+
+        public long like_count;
+    }
+    public class posts : List<post>
+    {
+        public long count;
+        public bool has_next_page;
+        public string end_cursor;
+        public posts() => Clear();
+    }
     public class profile
     {
-        public bool is_business_account;
         public bool is_private;
         public bool is_verified;
 
@@ -29,6 +46,9 @@ namespace model
         public long id;
         public long followers;
         public long following;
+
+
+        public posts posts;
 
         public async Task<bool> Unfollow() => (await main.InstagramApi.web.friendships.Unfollow(id)).isSuccess;
 
@@ -88,14 +108,34 @@ namespace model
             _type = type;
         }
     }
-
+    public class followers
+    {
+        public long count = 0;
+        public bool has_next_page = false;
+        public string end_cursor = null;
+        public List<profile> list = new List<profile>();
+    }
     public class activity
     {
         public enum type { Undefined = 0, GraphLikeAggregatedStory = 1, GraphFollowAggregatedStory = 3, GraphGdprConsentStory = 173 };
         public string id;
         [JsonProperty("type")]
         public type _type;
-        public long expiring_at;
+        public double timestamp;
         public profile user;
+    }
+
+    public class config
+    {
+        public double activity_timestamp
+        {
+            get => main.InstagramApi.account.activity.timestamp;
+            set => main.InstagramApi.account.activity.timestamp = value;
+        }
+        public profile current_profile
+        {
+            get => main.User.user_profile;
+            set => main.User.user_profile = value;
+        }
     }
 }
