@@ -69,6 +69,8 @@ namespace main
     {
         public static model.profile user_profile;
         public static long user_id => user_profile.id;
+        public static List<string> followers;
+        public static List<string> following;
     }
     public static class InstagramApi
     {
@@ -120,7 +122,7 @@ namespace main
                     try
                     {
                         Hashtable table = (Hashtable)Web.Cookies.GetType().InvokeMember(
-                            "m_domainTable", BindingFlags.NonPublic | BindingFlags.GetField | BindingFlags.Instance, 
+                            "m_domainTable", BindingFlags.NonPublic | BindingFlags.GetField | BindingFlags.Instance,
                             null, Web.Cookies, new object[] { });
                         var x = JsonConvert.DeserializeObject<JObject>(JsonConvert.SerializeObject(table[".instagram.com"]));
                         var a = (x.GetValue("Values") as JArray);
@@ -287,28 +289,24 @@ namespace main
                     consumer_link = consumer_link.Substring(0, ind);
 
                     var consumer = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(consumer_link));
-                    if ((ind = consumer.IndexOf("959:")) < 0) throw new Exception("First step find consumer fail");
-                    consumer = consumer.Substring(ind);
-                    if ((ind = consumer.IndexOf("960:")) < 0) throw new Exception("Last step find consumer fail");
-                    consumer = consumer.Substring(0, ind);
 
-                    Regex r = new Regex("(?<key>[a-z])=\"(?<value>[a-z0-9]{32})\"");
-                    Dictionary<string, string> fields = new Dictionary<string, string>();
-                    foreach (Match match in r.Matches(consumer))
-                        if (match.Success) fields.Add(match.Groups[1].ToString(), match.Groups[2].ToString());
-
+                    
                     for (int i = 0; i < config.consumer.Count; i++)
                     {
                         var k = config.consumer.ElementAt(i).Key;
-                        Regex r2 = new Regex(string.Format("[a-z]=(?<field>[a-z]),[a-z]=\"{0}\"", k));
-                        foreach (Match match in r2.Matches(consumer))
+                        Regex _r = new Regex(string.Format("[a-z]=(?<field>[a-z]),[a-z]=\"{0}\"", k));
+                        var _m = _r.Match(consumer);
+                        if (_m.Success)
                         {
-                            var field = match.Groups["field"].ToString();
-                            if (match.Success && fields.ContainsKey(field))
-                                config.consumer[k] = fields[field];
+                            var field = _m.Groups["field"].ToString();
+                            var __r = new Regex("("+field+")=\"(?<value>[a-z0-9]{32})\"");
+                            var __m = __r.Match(consumer);
+                            if (__m.Success)
+                            {
+                                config.consumer[k] = __m.Groups["value"].ToString();
+                            }
                         }
                     }
-
 
                     var o = DecodeSharedData(debug_string);
                     var auth = JsonConvert.DeserializeObject<model.auth>(
@@ -372,6 +370,7 @@ namespace main
                             {
                                 var node = o.Value<JObject>("node");
                                 model.activity a = JsonConvert.DeserializeObject<model.activity>(node.ToString());
+                                if (!(a.timestamp > timestamp)) break;
                                 if (a._type != model.activity.type.GraphGdprConsentStory)
                                 {
                                     var user = o.Value<JObject>("node").Value<JObject>("user");
@@ -396,20 +395,86 @@ namespace main
                 public class _cv
                 {
                     public long current = 0;
+                    public long update_target = 0;
+                    public List<string> list = null;
                     //public long max = 0;
-                    public _cv() { }
+                    public _cv(List<string> _list = null)
+                    {
+                        list = _list;
+                    }
                 }
                 static readonly string Link = account.Link + "access_tool/";
                 static Dictionary<string, _cv> Current_value = new Dictionary<string, _cv>()
                 {
                     {"current_follow_requests", new _cv() },
-                    {"accounts_following_you", new _cv() },
-                    {"accounts_you_follow", new _cv() }
+                    {"accounts_following_you", new _cv(User.followers) },
+                    {"accounts_you_follow", new _cv(User.following) }
                 };
-                static async Task<ApiResult<List<string>>> LoadALL(string Link)
+                static long UpdateList(string Link, int offset, int count, List<string> b)
+                {
+                    long result = 0;
+                    List<string> a = new List<string>();
+
+                    if (Link == "accounts_following_you") a = User.followers.GetRange(offset, count);
+                    else if (Link == "accounts_you_follow") a = User.following.GetRange(offset, count);
+                    var x2 = a.Intersect(b).ToList();
+                    var x3 = a.Except(b).ToList();
+                    var x4 = b.Intersect(a).ToList();
+                    var x5 = b.Except(a).ToList();
+                    if (Current_value[Link].update_target > 0)
+                    {
+                        foreach (var v5 in x5)
+                        {
+                            var pos = b.IndexOf(v5);
+                            if (Link == "accounts_following_you")
+                            {
+                                User.followers.Insert(offset + pos, v5);
+                                a = User.followers.GetRange(offset, count);
+                            }
+                            else if (Link == "accounts_you_follow")
+                            {
+                                User.following.Insert(offset + pos, v5);
+                                a = User.following.GetRange(offset, count);
+                            }
+                            result++;
+                            if (--Current_value[Link].update_target == 0) return result;
+                        }
+                    }
+                    else if (Current_value[Link].update_target < 0)
+                    {
+                        foreach (var v3 in x3)
+                        {
+                            if (Link == "accounts_following_you")
+                            {
+                                if (User.followers.Remove(v3))
+                                {
+                                    result++;
+                                    a = User.followers.GetRange(offset, count);
+                                }
+                            }
+                            else if (Link == "accounts_you_follow")
+                            {
+                                if (User.following.Remove(v3))
+                                {
+                                    result++;
+                                    a = User.following.GetRange(offset, count);
+                                }
+                            }
+                            if (++Current_value[Link].update_target == 0) return result;
+                            //var pos = b.IndexOf(v3);
+                            //a.Insert(offset + pos, v3);
+                        }
+                    }
+                    return result;
+                }
+                static async Task<ApiResult<List<string>>> LoadALL(string Link, long first_update = 0)
                 {
                     string _Link = Link;
                     Current_value[_Link] = new _cv();
+                    Current_value[_Link].update_target = first_update;
+
+
+
                     Link = access_tool.Link + string.Format("{0}?__a=1", Link);
                     List<string> result = new List<string>();
                     try
@@ -417,22 +482,26 @@ namespace main
                         var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(Link));
                         JObject data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
                         List<string> _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
+
+                        UpdateList(_Link, result.Count, _list.Count, _list);
                         result.AddRange(_list);
                         Current_value[_Link].current += _list.Count;
 
                         Object cursor = null;
-                        while ((cursor = data.GetValue("cursor").ToObject<Object>()) != null)
+                        while (((cursor = data.GetValue("cursor").ToObject<Object>()) != null) && (Current_value[_Link].update_target != 0))
                         {
                             debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(string.Format("{0}&cursor={1}", Link, cursor)));
                             data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
-
                             _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
+                            UpdateList(_Link, result.Count, _list.Count, _list);
                             result.AddRange(_list);
                             Current_value[_Link].current += _list.Count;
                         }
                     }
                     catch (Exception ex) { return new ApiResult<List<string>>(ex); }
-                    return new ApiResult<List<string>>(result);
+                    //return new ApiResult<List<string>>(result);
+                    return new ApiResult<List<string>>(_Link == "accounts_following_you" ? User.followers :
+                        _Link == "accounts_you_follow" ? User.following : result);
                 }
 
                 public static class current_follow_requests
@@ -441,7 +510,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     //public static long current_max => User.user_profile.followers;
                     //Current_value[name].max;
-                    public static async Task<ApiResult<List<string>>> LoadALL() => await access_tool.LoadALL(name);
+                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
                 public static class accounts_following_you
                 {
@@ -449,7 +518,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     public static long current_max => User.user_profile.followers;
                     //Current_value[name].max;
-                    public static async Task<ApiResult<List<string>>> LoadALL() => await access_tool.LoadALL(name);
+                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
 
                 public static class accounts_you_follow
@@ -458,7 +527,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     public static long current_max => User.user_profile.following;
                     //Current_value[name].max;
-                    public static async Task<ApiResult<List<string>>> LoadALL() => await access_tool.LoadALL(name);
+                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
             }
         }

@@ -62,23 +62,23 @@ namespace main
 
                 Console.WriteLine("Done. -> followers: {0}, following: {1}", User.user_profile.followers, User.user_profile.following);
 
-                var activity = (await InstagramApi.account.activity.Load(true)).GetResult();
-                Console.WriteLine("\t --- Activity list ---");
+                //var activity = (await InstagramApi.account.activity.Load(true)).GetResult();
+                //Console.WriteLine("\t --- Activity list ---");
 
-                foreach (var i in activity)
-                {
-                    Console.WriteLine(" >>> {0} => {1} <<<", i.user.ToString(), i._type.ToString());
-                }
+                //foreach (var i in activity)
+                //{
+                //    Console.WriteLine(" >>> {0} => {1} <<<", i.user.ToString(), i._type.ToString());
+                //}
 
-                Console.WriteLine("\t --- Count = {0} ---", activity.Count);
+                //Console.WriteLine("\t --- Count = {0} ---", activity.Count);
 
                 //thread.Abort();
                 //return;
 
-                List<string> followers = JsonConvert.DeserializeObject<List<string>>(
+                User.followers = JsonConvert.DeserializeObject<List<string>>(
                     await Dev.ReadAsync("followers.json")
                 );
-                List<string> following = JsonConvert.DeserializeObject<List<string>>(
+                User.following = JsonConvert.DeserializeObject<List<string>>(
                     await Dev.ReadAsync("following.json")
                 );
 
@@ -114,9 +114,8 @@ namespace main
 
                 #endregion
 
-
-                Task<ApiResult<List<string>>> Task_followers = Task.Run(() => new ApiResult<List<string>>(followers));
-                Task<ApiResult<List<string>>> Task_following = Task.Run(() => new ApiResult<List<string>>(following));
+                Task<ApiResult<List<string>>> Task_followers = Task.Run(() => new ApiResult<List<string>>(User.followers));
+                Task<ApiResult<List<string>>> Task_following = Task.Run(() => new ApiResult<List<string>>(User.following));
                 Log.isWork = false;
 
                 if (preupdate_profile.id != User.user_profile.id)
@@ -126,9 +125,17 @@ namespace main
                 } else
                 {
                     if (preupdate_profile.followers != User.user_profile.followers)
-                        Task_followers = InstagramApi.account.access_tool.accounts_following_you.LoadALL();          // Наша подписота
+                    {
+                        Console.WriteLine("Change count followers {0} -> {1}", preupdate_profile.followers, User.user_profile.followers);
+                        Task_followers = InstagramApi.account.access_tool.accounts_following_you.LoadALL(
+                            User.user_profile.followers - preupdate_profile.followers);          // Наша подписота
+                    }
                     if (preupdate_profile.following != User.user_profile.following)
-                        Task_following = InstagramApi.account.access_tool.accounts_you_follow.LoadALL();             // Мы подписаны 
+                    {
+                        Console.WriteLine("Change count following {0} -> {1}", preupdate_profile.following, User.user_profile.following);
+                        Task_following = InstagramApi.account.access_tool.accounts_you_follow.LoadALL(
+                            User.user_profile.following - preupdate_profile.following);             // Мы подписаны 
+                    }
                 }
 
                 Console.Write("Task_followers...");
@@ -165,16 +172,13 @@ namespace main
                 if (!api_followers.isSuccess) throw new Exception("Followers return error", api_followers.GetError());
                 if (!api_following.isSuccess) throw new Exception("Following return error", api_following.GetError());
 
-                followers = api_followers.GetResult();
-                following = api_following.GetResult();
+                User.followers = api_followers.GetResult();
+                User.following = api_following.GetResult();
 
-                Console.WriteLine("followers = {0}", followers.Count);
-                Console.WriteLine("following = {0}", following.Count);
+                Console.WriteLine("followers = {0}", User.followers.Count);
+                Console.WriteLine("following = {0}", User.following.Count);
 
-                await Dev.WriteAsync("followers.json", JsonConvert.SerializeObject(followers));
-                await Dev.WriteAsync("following.json", JsonConvert.SerializeObject(following));
-
-                var x = following.Except(followers).ToList();
+                var x = User.following.Except(User.followers).ToList();
                 var l = "";
                 Console.WriteLine("\t --- Current ignore list ---");
                 foreach (var i in InstagramApi.ignore_list)
@@ -279,7 +283,7 @@ namespace main
 
 
 
-                var z = following.Except(x).ToList();       // work list
+                var z = User.following.Except(x).ToList();       // work list
 
                 while (x.Count > 0)
                 {
@@ -289,6 +293,10 @@ namespace main
                         Console.Write("Unfollow from {0}...", i);
                         model.profile profile = (await InstagramApi.GetProfile(i)).GetResult();
                         await profile.Unfollow();
+
+                        User.user_profile.following--;
+                        User.following.Remove(i);
+
                         Console.Write("Ok\r\n");
 
                         var sel = InstagramApi.work_list.Where(e => e.profile.Equals(profile)).ToList();
@@ -303,6 +311,9 @@ namespace main
                         Thread.Sleep(sleep_try_next);
                     }
                 }
+
+                await Dev.WriteAsync("followers.json", JsonConvert.SerializeObject(User.followers));
+                await Dev.WriteAsync("following.json", JsonConvert.SerializeObject(User.following));
 
                 Console.WriteLine("End task");
             }
