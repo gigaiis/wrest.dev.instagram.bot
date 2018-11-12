@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Reflection;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +36,7 @@ namespace main
         public ApiResult(Exception exception) => SetError(exception);
         public ApiResult(T result, bool isChsh = false) => SetResult(result, isChsh);
         public ApiResult(List<string> result) => _result = (T)result.Cast<Object>();
+        public ApiResult(Dictionary<string, model.profile> result) => _result = JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(result));
         public ApiResult() { }
         public static implicit operator ApiResult<T>(ApiResult v)
         {
@@ -63,14 +63,15 @@ namespace main
 
         public static implicit operator ApiResult(ApiResult<long> v) => _implicit(v);
         public static implicit operator ApiResult(ApiResult<List<string>> v) => _implicit(v);
+        public static implicit operator ApiResult(ApiResult<Dictionary<string, model.profile>> v) => _implicit(v);
         public static implicit operator ApiResult(ApiResult<bool> v) => _implicit(v);
     }
     public static class User
     {
         public static model.profile user_profile;
         public static long user_id => user_profile.id;
-        public static List<string> followers;
-        public static List<string> following;
+        public static Dictionary<string, model.profile> followers;
+        public static Dictionary<string, model.profile> following;
     }
     public static class InstagramApi
     {
@@ -86,6 +87,14 @@ namespace main
         {
             try
             {
+                try
+                {
+                    Log.Init();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[WARNING]: Log.Init error: {0}", ex.Message);
+                }
 
                 account.activity.activity_list = await config.LoadModule<List<model.activity_list>>(activity_list_name);
                 var Task_config = config.LoadModule<model.config>(config.name);
@@ -113,6 +122,10 @@ namespace main
             {
                 {"edge_followed_by", "" },
                 {"edge_follow", "" }
+            };
+            public static Dictionary<string, string> consumercommons = new Dictionary<string, string>()
+            {
+                {"edge_suggested_users", "" }
             };
             private static string s_csrf_token = "";
             public static string csrf_token
@@ -270,6 +283,52 @@ namespace main
                 string user_id, bool _include_reel = true, bool _fetch_mutual = true, long _first = 24, string _after = null) =>
                     await followers_following_do("edge_follow", user_id, _include_reel, _fetch_mutual, _first, _after);
         }
+        public static class suggest
+        {
+            //            {"fetch_media_count":0,"fetch_suggested_count":10,"ignore_cache":true,"filter_followed_friends":true,"seen_ids":[],"include_reel":true}
+            //            {...,"ignore_cache":false,"filter_followed_friends":true,"seen_ids":["5392365233", ... ,"3808960670"],"include_reel":true}
+            public static async Task<ApiResult<model.suggests>> Get(List<string> _seen_ids, long _fetch_media_count = 0, long _fetch_suggested_count = 10,
+                bool _ignore_cache = true, bool _filter_followed_friends = true, bool _include_reel = true)
+            {
+                try
+                {
+                    var result = new model.suggests();
+                    var type = "edge_suggested_users";
+
+                    object o = new
+                    {
+                        fetch_media_count = _fetch_media_count,
+                        fetch_suggested_count = _fetch_suggested_count,
+                        ignore_cache = _ignore_cache,
+                        filter_followed_friends = _filter_followed_friends,
+                        seen_ids = _seen_ids,
+                        include_reel = _include_reel
+                    };
+
+                    var el = await Web.Navigate.Get(
+                           Web.GenXRequest(
+                               string.Format("https://www.instagram.com/graphql/query/?query_hash={0}&variables={1}",
+                                   config.consumercommons[type],
+                                   Uri.EscapeDataString(JsonConvert.SerializeObject(o))
+                               )
+                           ), null);
+
+                    var data = JsonConvert.DeserializeObject<JObject>(el).GetValue("data") as JObject;
+                    var user = data.GetValue("user") as JObject;
+                    var edge = user.GetValue(type) as JObject;
+                    var page_info = edge.GetValue("page_info") as JObject;
+                    result.has_next_page = page_info.Value<bool>("has_next_page");
+                    var edges = edge.GetValue("edges") as JArray;
+                    edges = JArray.FromObject(edges.Select(e => (e as JObject).GetValue("node") as JObject));
+
+
+                    JsonSerializerSettings settings = new JsonSerializerSettings();
+                    result.list = JsonConvert.DeserializeObject<List<model.suggests.suggest>>(edges.ToString());
+                    return new ApiResult(result);
+                }
+                catch (Exception ex) { return new ApiResult<model.suggests>(ex); }
+            }
+        }
         public static class account
         {
             static readonly string Link = "https://www.instagram.com/accounts/";
@@ -281,16 +340,12 @@ namespace main
                     var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(link));
 
                     var consumer_link = debug_string;
-
                     int ind = -1;
                     if ((ind = consumer_link.IndexOf("/static/bundles/base/Consumer.js/")) < 0) throw new Exception("First step find consumer_link fail");
                     consumer_link = string.Format("https://www.instagram.com{0}", consumer_link.Substring(ind));
                     if ((ind = consumer_link.IndexOf("\"")) < 0) throw new Exception("Last step find consumer_link fail");
                     consumer_link = consumer_link.Substring(0, ind);
-
                     var consumer = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(consumer_link));
-
-                    
                     for (int i = 0; i < config.consumer.Count; i++)
                     {
                         var k = config.consumer.ElementAt(i).Key;
@@ -299,14 +354,23 @@ namespace main
                         if (_m.Success)
                         {
                             var field = _m.Groups["field"].ToString();
-                            var __r = new Regex("("+field+")=\"(?<value>[a-z0-9]{32})\"");
+                            var __r = new Regex("(" + field + ")=\"(?<value>[a-z0-9]{32})\"");
                             var __m = __r.Match(consumer);
-                            if (__m.Success)
-                            {
-                                config.consumer[k] = __m.Groups["value"].ToString();
-                            }
+                            if (__m.Success) config.consumer[k] = __m.Groups["value"].ToString();
                         }
                     }
+
+                    var consumercommons_link = debug_string;
+                    if ((ind = consumercommons_link.IndexOf("/static/bundles/base/ConsumerCommons.js/")) < 0) throw new Exception("First step find consumercommons_link fail");
+                    consumercommons_link = string.Format("https://www.instagram.com{0}", consumercommons_link.Substring(ind));
+                    if ((ind = consumercommons_link.IndexOf("\"")) < 0) throw new Exception("Last step find consumer_link fail");
+                    consumercommons_link = consumercommons_link.Substring(0, ind);
+                    var consumercommons = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(consumercommons_link));
+                    Regex r = new Regex("[a-z],[a-z],[a-z],[a-z]=\"[a-z0-9]{32}\",[a-z]=\"[a-z0-9]{32}\",[a-z]=\"[a-z0-9]{32}\",[a-z]=\"(?<edge_suggested_users>[a-z0-9]{32})\"");
+                    var m = r.Match(consumercommons);
+                    if (m.Success) config.consumercommons["edge_suggested_users"] = m.Groups["edge_suggested_users"].ToString();
+
+
 
                     var o = DecodeSharedData(debug_string);
                     var auth = JsonConvert.DeserializeObject<model.auth>(
@@ -392,97 +456,121 @@ namespace main
             }
             public static class access_tool
             {
+                public class act
+                {
+                    public enum act_type { unknown = 0, followers_follow = 1, followers_unfollow = 2, following_follow = 3, following_unfollow = 4 };
+                    public act_type act_Type;
+                    public string username;
+                    public int timestamp = Dev.GetUnixTimestamp();
+                    public act(string username, act_type act_Type)
+                    {
+                        this.username = username;
+                        this.act_Type = act_Type;
+                    }
+                    public override string ToString() => string.Format("{0} has been {1}", username, act_Type.ToString());
+                }
+                public static List<act> current_action_follow_list = new List<act>();
                 public class _cv
                 {
                     public long current = 0;
                     public long update_target = 0;
-                    public List<string> list = null;
-                    //public long max = 0;
-                    public _cv(List<string> _list = null)
-                    {
-                        list = _list;
-                    }
                 }
                 static readonly string Link = account.Link + "access_tool/";
                 static Dictionary<string, _cv> Current_value = new Dictionary<string, _cv>()
                 {
                     {"current_follow_requests", new _cv() },
-                    {"accounts_following_you", new _cv(User.followers) },
-                    {"accounts_you_follow", new _cv(User.following) }
+                    {"accounts_following_you", new _cv() },
+                    {"accounts_you_follow", new _cv() }
                 };
-                static long UpdateList(string Link, int offset, int count, List<string> b)
+                static Dictionary<string, model.profile> UpdateList(string Link, int offset, int count, Dictionary<string, model.profile> b)
                 {
-                    long result = 0;
-                    List<string> a = new List<string>();
-
-                    if (Link == "accounts_following_you") a = User.followers.GetRange(offset, count);
-                    else if (Link == "accounts_you_follow") a = User.following.GetRange(offset, count);
-                    var x2 = a.Intersect(b).ToList();
-                    var x3 = a.Except(b).ToList();
-                    var x4 = b.Intersect(a).ToList();
-                    var x5 = b.Except(a).ToList();
-                    if (Current_value[Link].update_target > 0)
+                    var result = new Dictionary<string, model.profile>();
+                    Dictionary<string, model.profile> _a = null;
+                    act.act_type ftype = act.act_type.unknown;
+                    act.act_type uftype = act.act_type.unknown;
+                    if (Link == "accounts_following_you")
                     {
-                        foreach (var v5 in x5)
-                        {
-                            var pos = b.IndexOf(v5);
-                            if (Link == "accounts_following_you")
-                            {
-                                User.followers.Insert(offset + pos, v5);
-                                a = User.followers.GetRange(offset, count);
-                            }
-                            else if (Link == "accounts_you_follow")
-                            {
-                                User.following.Insert(offset + pos, v5);
-                                a = User.following.GetRange(offset, count);
-                            }
-                            result++;
-                            if (--Current_value[Link].update_target == 0) return result;
-                        }
+                        _a = User.followers;
+                        ftype = act.act_type.followers_follow;
+                        uftype = act.act_type.followers_unfollow;
                     }
-                    else if (Current_value[Link].update_target < 0)
+                    else if (Link == "accounts_you_follow")
                     {
-                        foreach (var v3 in x3)
+                        _a = User.following;
+                        ftype = act.act_type.following_follow;
+                        uftype = act.act_type.following_unfollow;
+                    }
+                    if ((Current_value[Link].update_target == 0) || (_a == null)) return new Dictionary<string, model.profile>();
+
+                    var a = _a.GetRange(offset, count);
+
+                    string v1 = null, v2 = null;
+                    var x1 = a.Except(b).ToDictionary(t => t.Key, t => t.Value);
+                    var x2 = b.Except(a).ToDictionary(t => t.Key, t => t.Value);
+                    var p1 = (x1.Count > 0) ? a.IndexOf(v1 = x1.First().Key) : -1;
+                    var p2 = (x2.Count > 0) ? b.IndexOf(v2 = x2.First().Key) : -1;
+                    while (p1 != p2)
+                    {
+                        if (p1 > -1 && p2 > -1)
                         {
-                            if (Link == "accounts_following_you")
+                            if (p1 < p2)
                             {
-                                if (User.followers.Remove(v3))
-                                {
-                                    result++;
-                                    a = User.followers.GetRange(offset, count);
-                                }
+                                if (!_a.Remove(v1))
+                                    throw new Exception(string.Format("Cant delete element \"{0}\", not found", v1));
+                                Current_value[Link].update_target++;
+                                current_action_follow_list.Add(new act(v1, uftype));
                             }
-                            else if (Link == "accounts_you_follow")
+                            else if (p1 > p2)
                             {
-                                if (User.following.Remove(v3))
-                                {
-                                    result++;
-                                    a = User.following.GetRange(offset, count);
-                                }
+                                if (!_a.Insert(offset + p2, new KeyValuePair<string, model.profile>(v2, x2[v2])))
+                                    Log.Write(new List<string>() { string.Format("Item already exist with Key = {0}", v2) }, Log.Type.warning);
+                                Current_value[Link].update_target--;
+                                current_action_follow_list.Add(new act(v2, ftype));
                             }
-                            if (++Current_value[Link].update_target == 0) return result;
-                            //var pos = b.IndexOf(v3);
-                            //a.Insert(offset + pos, v3);
+                            else
+                            {
+                                current_action_follow_list.Add(new act(v1, uftype));
+                                current_action_follow_list.Add(new act(v2, ftype));
+                                _a[_a.ElementAt(offset + p2).Key] = x2[v2];
+                            }
                         }
+                        else if (p1 > -1)
+                        {
+                            current_action_follow_list.Add(new act(v1, uftype));
+                            if (!_a.Remove(v1))
+                                throw new Exception(string.Format("Cant delete element \"{0}\", not found", v1));
+                            Current_value[Link].update_target++;
+                        }
+                        else if (p2 > -1)
+                        {
+                            if (!_a.Insert(offset + p2, new KeyValuePair<string, model.profile>(v2, x2[v2])))
+                                Log.Write(new List<string>() { string.Format("Item already exist with Key = {0}", v2) }, Log.Type.warning);
+                            Current_value[Link].update_target--;
+                            current_action_follow_list.Add(new act(v2, ftype));
+                        }
+
+                        a = offset + count < _a.Count ? _a.GetRange(offset, count) : _a.GetRange(offset, Math.Abs(_a.Count - offset));
+                        x1 = a.Except(b).ToDictionary(t => t.Key, t => t.Value);
+                        x2 = b.Except(a).ToDictionary(t => t.Key, t => t.Value);
+                        p1 = (x1.Count > 0) ? a.IndexOf(v1 = x1.First().Key) : -1;
+                        p2 = (x2.Count > 0) ? b.IndexOf(v2 = x2.First().Key) : -1;
                     }
                     return result;
                 }
-                static async Task<ApiResult<List<string>>> LoadALL(string Link, long first_update = 0)
+                static async Task<ApiResult<Dictionary<string, model.profile>>> LoadALL(string Link, long first_update = 0)
                 {
                     string _Link = Link;
                     Current_value[_Link] = new _cv();
                     Current_value[_Link].update_target = first_update;
-
-
-
                     Link = access_tool.Link + string.Format("{0}?__a=1", Link);
-                    List<string> result = new List<string>();
+                    Dictionary<string, model.profile> result = new Dictionary<string, model.profile>();
                     try
                     {
                         var debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(Link));
                         JObject data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
-                        List<string> _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
 
+                        Dictionary<string, model.profile> _list = ((JArray)data.GetValue("data")).Select(e =>
+                            ((JObject)e).GetValue("text").ToString()).ToDictionary(t => t, t => new model.profile() { username = t });
                         UpdateList(_Link, result.Count, _list.Count, _list);
                         result.AddRange(_list);
                         Current_value[_Link].current += _list.Count;
@@ -492,15 +580,16 @@ namespace main
                         {
                             debug_string = await Web.Navigate.Get((HttpWebRequest)WebRequest.Create(string.Format("{0}&cursor={1}", Link, cursor)));
                             data = JsonConvert.DeserializeObject<JObject>(debug_string).GetValue("data") as JObject;
-                            _list = ((JArray)data.GetValue("data")).Select(e => ((JObject)e).GetValue("text").ToString()).ToList();
+                            _list = ((JArray)data.GetValue("data")).Select(e =>
+                                ((JObject)e).GetValue("text").ToString()).ToDictionary(t => t, t => new model.profile() { username = t });
                             UpdateList(_Link, result.Count, _list.Count, _list);
                             result.AddRange(_list);
                             Current_value[_Link].current += _list.Count;
                         }
                     }
-                    catch (Exception ex) { return new ApiResult<List<string>>(ex); }
+                    catch (Exception ex) { return new ApiResult<Dictionary<string, model.profile>>(ex); }
                     //return new ApiResult<List<string>>(result);
-                    return new ApiResult<List<string>>(_Link == "accounts_following_you" ? User.followers :
+                    return new ApiResult<Dictionary<string, model.profile>>(_Link == "accounts_following_you" ? User.followers :
                         _Link == "accounts_you_follow" ? User.following : result);
                 }
 
@@ -510,7 +599,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     //public static long current_max => User.user_profile.followers;
                     //Current_value[name].max;
-                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
+                    public static Task<ApiResult<Dictionary<string, model.profile>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
                 public static class accounts_following_you
                 {
@@ -518,7 +607,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     public static long current_max => User.user_profile.followers;
                     //Current_value[name].max;
-                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
+                    public static Task<ApiResult<Dictionary<string, model.profile>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
 
                 public static class accounts_you_follow
@@ -527,7 +616,7 @@ namespace main
                     public static long current_pos => Current_value[name].current;
                     public static long current_max => User.user_profile.following;
                     //Current_value[name].max;
-                    public static Task<ApiResult<List<string>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
+                    public static Task<ApiResult<Dictionary<string, model.profile>>> LoadALL(long first_update = 0) => access_tool.LoadALL(name, first_update);
                 }
             }
         }

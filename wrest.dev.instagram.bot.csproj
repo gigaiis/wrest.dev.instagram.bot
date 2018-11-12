@@ -45,6 +45,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Dev.cs" />
+    <Compile Include="HTTPServer.cs" />
     <Compile Include="InstagramApi.cs" />
     <Compile Include="Log.cs" />
     <Compile Include="Program.cs" />

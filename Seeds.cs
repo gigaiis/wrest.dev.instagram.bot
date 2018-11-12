@@ -47,10 +47,9 @@ namespace model
         public long followers;
         public long following;
 
-
         public posts posts;
 
-        public async Task<bool> Unfollow() => (await main.InstagramApi.web.friendships.Unfollow(id)).isSuccess;
+        public async Task<bool> Unfollow() => ((id != main.User.user_id) && ((await main.InstagramApi.web.friendships.Unfollow(id)).isSuccess));
 
         public override bool Equals(object obj)
         {
@@ -62,7 +61,22 @@ namespace model
             else return base.Equals(obj);
         }
         public override int GetHashCode() => base.GetHashCode();
-        public override string ToString() => string.Format("[user_id: {0}, username: {1}, full_name: {2}]", id, username, full_name);
+        public override string ToString() => string.Format("[user_id.{0}+username.{1}+full_name.{2}]", id, username, full_name);
+
+        public async Task<bool> Reload()
+        {
+            var result = await main.InstagramApi.GetProfile(username, true);
+            if (!result.isSuccess) return false;
+            var prof = result.GetResult();
+            is_private = prof.is_private;
+            is_verified = prof.is_verified;
+            full_name = prof.full_name;
+            id = prof.id;
+            followers = prof.followers;
+            following = prof.following;
+            posts = prof.posts;
+            return true;
+        }
     }
 
     public class profile_hist
@@ -115,6 +129,38 @@ namespace model
         public string end_cursor = null;
         public List<profile> list = new List<profile>();
     }
+    public class suggests
+    {
+        public class suggest
+        {
+            public enum Type
+            {
+                unknown = 0,
+                followed_by = 1,
+                suggest_for_you = 2,
+                new_to_instagram = 3,
+                in_your_contacts = 4
+            };
+
+            public profile user;
+            public string description
+            {
+                set
+                {
+                    if (value.Contains("Followed by")) type = Type.followed_by;
+                    else if (value.Contains("Suggested for you")) type = Type.suggest_for_you;
+                    else if (value.Contains("New to Instagram")) type = Type.new_to_instagram;
+                    else if (value.Contains("In your contacts")) type = Type.in_your_contacts;
+                    else type = Type.unknown;
+                }
+            }
+            public Type type;
+
+            public override string ToString() => string.Format("[user.{0}+type.{1}]", user.ToString(), type.ToString());
+        }
+        public bool has_next_page = false;
+        public List<suggest> list = new List<suggest>();
+    }
     public class activity
     {
         public enum type { Undefined = 0, GraphLikeAggregatedStory = 1, GraphFollowAggregatedStory = 3, GraphGdprConsentStory = 173 };
@@ -123,6 +169,12 @@ namespace model
         public type _type;
         public double timestamp;
         public profile user;
+    }
+
+    public class TEST
+    {
+        public string Name;
+        public string Sex;
     }
 
     public class config
@@ -136,6 +188,16 @@ namespace model
         {
             get => main.User.user_profile;
             set => main.User.user_profile = value;
+        }
+        public List<main.InstagramApi.account.access_tool.act> current_action_follow_list
+        {
+            get => main.InstagramApi.account.access_tool.current_action_follow_list;
+            set => main.InstagramApi.account.access_tool.current_action_follow_list = value;
+        }
+        public List<main.Web.act> current_action_web_list
+        {
+            get => main.Web.current_action_web_list;
+            set => main.Web.current_action_web_list = value;
         }
     }
 }
