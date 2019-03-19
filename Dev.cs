@@ -9,8 +9,8 @@ namespace main
 {
     public static class Dev
     {
-        public static Int32 GetUnixTimestamp(DateTime? time = null) => (Int32)((time != null) ? (time.Value) : DateTime.UtcNow).Subtract(new DateTime(1970, 1, 1)).TotalSeconds;
-        public static DateTime TimestampToDateTime(Int32 timestamp) => (new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc).AddSeconds(timestamp));
+        public static double GetUnixTimestamp(DateTime? time = null) => ((time != null) ? (time.Value) : DateTime.UtcNow).Subtract(new DateTime(1970, 1, 1)).TotalMilliseconds / 1000;
+        public static DateTime TimestampToDateTime(double timestamp) => new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(timestamp * 1000);
         public static async Task<string> ReadAsync(string filename)
         {
             using (FileStream fs = new FileStream(filename, FileMode.OpenOrCreate, FileAccess.Read))
@@ -41,7 +41,6 @@ namespace main
                 return;
             }
         }
-
         public static string GetTranslitText(string text)
         {
             var rules = new Dictionary<char, string>()
@@ -66,53 +65,78 @@ namespace main
                 }
             return result;
         }
+        public static async Task RestartApp()
+        {
+            await Log.Write(new List<string>() {
+                string.Format("Restart app, success = {0}",
+                System.Diagnostics.Process.Start(AppDomain.CurrentDomain.FriendlyName).ToString())
+            }, Log.Type.warning);
+            Environment.Exit(0);
+        }
     }
 }
 
 namespace System.Collections.Generic
 {
-    public static class DictionaryExtensionsClass
+    public static class HashSetExtensionsClass
     {
-        public static Dictionary<T, U> GetRange<T, U>(this Dictionary<T, U> d, int index) => GetRange(d, index, d.Count);
-        public static Dictionary<T, U> GetRange<T, U>(this Dictionary<T, U> d, int index, int count)
+        public static HashSet<T> ToHashSet<T>(this IEnumerable<T> source, IEqualityComparer<T> comparer = null) => new HashSet<T>(source, comparer);
+        public static bool RemoveAt<T>(this HashSet<T> source, int index) => index < source.Count() && (index >= 0) && source.Remove(source.ElementAt(index));
+        public static HashSet<T> Range<T>(this IEnumerable<T> source, int index)
         {
-            var res = new Dictionary<T, U>();
-            var last_index = (index + count - 1 >= d.Count) ? d.Count - 1 : index + count - 1;
-            for (int i = index; i <= last_index; i++)
-            {
-                var e = d.ElementAt(i);
-                res.Add(e.Key, e.Value);
-            }
+            var res = new HashSet<T>();
+            for (int i = index; i < source.Count(); i++)
+                res.Add(source.ElementAt(i));
             return res;
         }
-        public static Dictionary<T, U> AddRange<T, U>(this Dictionary<T, U> d, Dictionary<T, U> v)
+        public static HashSet<T> Range<T>(this IEnumerable<T> source, int index, int count)
         {
-            foreach (var e in v)
-                d.Insert(e);
-            return d;
+            var res = new HashSet<T>();
+            var last_index = (index + count - 1 >= source.Count()) ? source.Count() - 1 : index + count - 1;
+            for (int i = index; i <= last_index; i++)
+                res.Add(source.ElementAt(i));
+            return res;
         }
-        public static int IndexOf<T, U>(this Dictionary<T, U> d, T k)
+        public static int IndexOf<T>(this IEnumerable<T> source, T value)
         {
-            for (int i = 0; i < d.Count; i++)
-                if (d.ElementAt(i).Key.Equals(k)) return i;
+            for (int i = 0; i < source.Count(); i++)
+                if (source.ElementAt(i).Equals(value)) return i;
             return -1;
         }
-        public static bool Insert<T, U>(this Dictionary<T, U> d, KeyValuePair<T, U> v)
+        public static int Insert<T>(this HashSet<T> source, int index, T value, bool isOverride = false)
         {
-            if (d.ContainsKey(v.Key)) return false;
-            d.Add(v.Key, v.Value);
-            return true;
+            if (source.Contains(value))
+                return (!isOverride || !source.Remove(value)) ? 0 : 3;
+            else if (source.Count == index)
+            {
+                source.Add(value);
+                return 1;
+            }
+            var p = source.Range(0, index);
+            if (!p.Add(value)) return 0;
+            p = p.AddRange(source.Range(index));
+            source.Clear();
+            source.AddRange(p);
+            return 1;
         }
-        public static bool Insert<T, U>(this Dictionary<T, U> d, int index, KeyValuePair<T, U> v)
+        public static HashSet<T> AddRange<T>(this HashSet<T> source, HashSet<T> value)
         {
-            if (d.ContainsKey(v.Key)) return false;
-            var p = GetRange(d, 0, index);
-            if (!p.Insert(v)) return false;
-            p = p.AddRange(GetRange(d, index));
-            d.Clear();
-            d.AddRange(p);
-            return true;
+            foreach (var e in value)
+                source.Add(e);
+            return source;
         }
-        public static bool RemoveAt<T, U>(this Dictionary<T, U> d, int index) => d.Remove(d.ElementAt(index).Key);
+        public static bool Swap<T>(this HashSet<T> source, int p1, int p2)
+        {
+            if ((p1 == p2) || !(p1 < source.Count() || p2 < source.Count())) return false;
+            var dp = source.ElementAt(p1);
+            return (source.Replace(p1, source.ElementAt(p2)) & source.Replace(p2, dp)) == 1;
+        }
+        public static int Replace<T>(this HashSet<T> source, int p, T value)
+        {
+            var result = ((p < source.Count()) && (p >= 0)
+                && source.Remove(source.ElementAt(p))) ? 1 : 0;
+            var resultInsert = source.Insert(p, value, true);
+            return result | (resultInsert & 2);
+        }
     }
 }
